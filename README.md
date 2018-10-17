@@ -12,6 +12,8 @@ The only differences are:
     - oss-license-plugin depends on Android gradle plugin 3.2.0
     - oss-license-plugin release version 0.9.3.1 due to the previous change
 
+This also add  a maven repository in the `repo` folder in order to publish version 0.9.3.1.
+
 
 ## Getting Started
 
