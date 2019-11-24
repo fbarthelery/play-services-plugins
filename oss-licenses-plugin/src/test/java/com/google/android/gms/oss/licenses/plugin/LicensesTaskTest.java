@@ -121,10 +121,10 @@ public class LicensesTaskTest {
 
   @Test
   public void testAddLicensesFromPom() throws IOException {
-    File deps1 = new File("dependencies/groupA/deps1.txt");
+    File deps1 = getResourceFile("dependencies/groupA/deps1.pom");
     String name1 = "deps1";
     String group1 = "groupA";
-    licensesTask.addLicensesFromPom(deps1, name1, group1);
+    licensesTask.addLicensesFromPom(deps1, group1, name1);
 
     String content = new String(Files.readAllBytes(licensesTask.licenses.toPath()), UTF_8);
     String expected = "http://www.opensource.org/licenses/mit-license.php" + LINE_BREAK;
@@ -134,15 +134,15 @@ public class LicensesTaskTest {
 
   @Test
   public void testAddLicensesFromPom_withoutDuplicate() throws IOException {
-    File deps1 = new File("dependencies/groupA/deps1.txt");
+    File deps1 = getResourceFile("dependencies/groupA/deps1.pom");
     String name1 = "deps1";
     String group1 = "groupA";
-    licensesTask.addLicensesFromPom(deps1, name1, group1);
+    licensesTask.addLicensesFromPom(deps1, group1, name1);
 
-    File deps2 = new File("dependencies/groupB/deps2.txt");
+    File deps2 = getResourceFile("dependencies/groupB/bcd/deps2.pom");
     String name2 = "deps2";
     String group2 = "groupB";
-    licensesTask.addLicensesFromPom(deps2, name2, group2);
+    licensesTask.addLicensesFromPom(deps2, group2, name2);
 
     String content = new String(Files.readAllBytes(licensesTask.licenses.toPath()), UTF_8);
     String expected =
@@ -158,16 +158,44 @@ public class LicensesTaskTest {
   }
 
   @Test
-  public void testAddLicensesFromPom_withDuplicate() throws IOException {
-    File deps1 = new File("dependencies/groupA/deps1.txt");
+  public void testAddLicensesFromPom_withMultiple() throws IOException {
+    File deps1 = getResourceFile("dependencies/groupA/deps1.pom");
     String name1 = "deps1";
     String group1 = "groupA";
-    licensesTask.addLicensesFromPom(deps1, name1, group1);
+    licensesTask.addLicensesFromPom(deps1, group1, name1);
 
-    File deps2 = new File("dependencies/groupA/deps1.txt");
+    File deps2 = getResourceFile("dependencies/groupE/deps5.pom");
+    String name2 = "deps5";
+    String group2 = "groupE";
+    licensesTask.addLicensesFromPom(deps2, group2, name2);
+
+    String content = new String(Files.readAllBytes(licensesTask.licenses.toPath()), UTF_8);
+    String expected =
+        "http://www.opensource.org/licenses/mit-license.php"
+            + LINE_BREAK
+            + "http://www.opensource.org/licenses/mit-license.php"
+            + LINE_BREAK
+            + "https://www.apache.org/licenses/LICENSE-2.0"
+            + LINE_BREAK;
+
+    assertThat(licensesTask.licensesMap.size(), is(3));
+    assertTrue(licensesTask.licensesMap.containsKey("groupA:deps1"));
+    assertTrue(licensesTask.licensesMap.containsKey("groupE:deps5 MIT License"));
+    assertTrue(licensesTask.licensesMap.containsKey("groupE:deps5 Apache License 2.0"));
+    assertEquals(expected, content);
+  }
+
+  @Test
+  public void testAddLicensesFromPom_withDuplicate() throws IOException {
+    File deps1 = getResourceFile("dependencies/groupA/deps1.pom");
+    String name1 = "deps1";
+    String group1 = "groupA";
+    licensesTask.addLicensesFromPom(deps1, group1, name1);
+
+    File deps2 = getResourceFile("dependencies/groupA/deps1.pom");
     String name2 = "deps1";
     String group2 = "groupA";
-    licensesTask.addLicensesFromPom(deps2, name2, group2);
+    licensesTask.addLicensesFromPom(deps2, group2, name2);
 
     String content = new String(Files.readAllBytes(licensesTask.licenses.toPath()), UTF_8);
     String expected = "http://www.opensource.org/licenses/mit-license.php" + LINE_BREAK;
@@ -175,6 +203,10 @@ public class LicensesTaskTest {
     assertThat(licensesTask.licensesMap.size(), is(1));
     assertTrue(licensesTask.licensesMap.containsKey("groupA:deps1"));
     assertEquals(expected, content);
+  }
+
+  private File getResourceFile(String resourcePath) {
+    return new File(getClass().getClassLoader().getResource(resourcePath).getFile());
   }
 
   @Test

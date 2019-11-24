@@ -52,7 +52,7 @@ class OssLicensesPlugin implements Plugin<Project> {
         project.android.applicationVariants.all { BaseVariant variant ->
             // This is necessary for backwards compatibility with versions of gradle that do not support
             // this new API.
-            if (variant.respondsTo("preBuildProvider")) {
+            if (variant.hasProperty("preBuildProvider")) {
                 variant.preBuildProvider.configure { dependsOn(licenseTask) }
             } else {
                 //noinspection GrDeprecatedAPIUsage
@@ -64,7 +64,13 @@ class OssLicensesPlugin implements Plugin<Project> {
             if (variant.respondsTo("registerGeneratedResFolders")) {
                 licenseTask.ext.generatedResFolders = project.files(resourceOutput).builtBy(licenseTask)
                 variant.registerGeneratedResFolders(licenseTask.generatedResFolders)
-                variant.mergeResources.dependsOn(licenseTask)
+
+                if (variant.hasProperty("mergeResourcesProvider")) {
+                    variant.mergeResourcesProvider.configure { dependsOn(licenseTask) }
+                } else {
+                    //noinspection GrDeprecatedAPIUsage
+                    variant.mergeResources.dependsOn(licenseTask)
+                }
             } else {
                 //noinspection GrDeprecatedAPIUsage
                 variant.registerResGeneratingTask(licenseTask, resourceOutput)
