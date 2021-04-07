@@ -20,14 +20,21 @@ import groovy.json.JsonBuilder
 import groovy.json.JsonException
 import groovy.json.JsonSlurper
 import org.gradle.api.DefaultTask
+import org.gradle.api.Project
 import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.ConfigurationContainer
+import org.gradle.api.artifacts.Dependency
+import org.gradle.api.artifacts.ExternalModuleDependency
+import org.gradle.api.artifacts.ProjectDependency
 import org.gradle.api.artifacts.ResolveException
 import org.gradle.api.artifacts.ResolvedArtifact
+import org.gradle.api.artifacts.ResolvedDependency
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
+import org.gradle.internal.component.AmbiguousVariantSelectionException
+import org.slf4j.LoggerFactory
 
 /**
  * This task does the following:
@@ -41,23 +48,79 @@ import org.gradle.api.tasks.TaskAction
 class DependencyTask extends DefaultTask {
     protected Set<String> artifactSet = []
     protected Set<ArtifactInfo> artifactInfos = []
+    protected static final String LOCAL_LIBRARY_VERSION = "unspecified"
     private static final String TEST_PREFIX = "test"
     private static final String ANDROID_TEST_PREFIX = "androidTest"
     private static final Set<String> TEST_COMPILE = ["testCompile",
                                                      "androidTestCompile"]
 
     private static final Set<String> PACKAGED_DEPENDENCIES_PREFIXES = ["compile",
-                                                            "implementation",
-                                                            "api"]
+                                                                       "implementation",
+                                                                       "api"]
 
-    @Input
-    public ConfigurationContainer configurations
+    private static final logger = LoggerFactory.getLogger(DependencyTask.class)
+
+    private Project project
 
     @OutputDirectory
-    public File outputDir
+    File outputDir
 
     @OutputFile
-    public File outputFile
+    File outputFile
+
+    /**
+     * Returns a serializable snapshot of direct dependencies from all relevant
+     * configurations to allow task caching. To improve performance, this does
+     * not resolve transitive dependencies. Direct dependencies should require a
+     * version bump to publish a new POM file with updated transitive
+     * dependencies.
+     */
+    @Input
+    List<String> getDirectDependencies() {
+        return collectDependenciesFromConfigurations(
+                project.getConfigurations(),
+                [project] as Set<Project>
+        )
+    }
+
+    protected List<String> collectDependenciesFromConfigurations(
+            ConfigurationContainer configurationContainer,
+            Set<Project> visitedProjects
+    ) {
+        Set<String> directDependencies = new HashSet<>()
+        Set<Project> libraryProjects = new HashSet<>()
+        for (Configuration configuration in configurationContainer) {
+            if (shouldSkipConfiguration(configuration)) {
+                continue
+            }
+
+            for (Dependency dependency in configuration.allDependencies) {
+                if (dependency instanceof ProjectDependency) {
+                    libraryProjects.add(dependency.getDependencyProject())
+                } else if (dependency instanceof ExternalModuleDependency) {
+                    directDependencies.add(toMavenId(dependency))
+                }
+            }
+        }
+        for (Project libraryProject in libraryProjects) {
+            if (libraryProject in visitedProjects) {
+                continue
+            }
+            visitedProjects.add(libraryProject)
+            logger.info("Visiting dependency ${libraryProject.displayName}")
+            directDependencies.addAll(
+                    collectDependenciesFromConfigurations(
+                            libraryProject.getConfigurations(),
+                            visitedProjects
+                    )
+            )
+        }
+        return directDependencies.sort()
+    }
+
+    protected static String toMavenId(Dependency dependency) {
+        return "${dependency.getGroup()}:${dependency.getName()}:${dependency.getVersion()}"
+    }
 
     @TaskAction
     void action() {
@@ -80,24 +143,25 @@ class DependencyTask extends DefaultTask {
      * false otherwise
      */
     protected boolean checkArtifactSet(File file) {
+        Set<String> artifacts = new HashSet<>(artifactSet)
         try {
             def previousArtifacts = new JsonSlurper().parse(file)
             for (entry in previousArtifacts) {
                 String key = "${entry.fileLocation}"
-                if (artifactSet.contains(key)) {
-                    artifactSet.remove(key)
+                if (artifacts.contains(key)) {
+                    artifacts.remove(key)
                 } else {
                     return false
                 }
             }
-            return artifactSet.isEmpty()
+            return artifacts.isEmpty()
         } catch (JsonException exception) {
             return false
         }
     }
 
     protected void updateDependencyArtifacts() {
-        for (Configuration configuration : configurations) {
+        for (Configuration configuration : project.getConfigurations()) {
             Set<ResolvedArtifact> artifacts = getResolvedArtifacts(
                     configuration)
             if (artifacts == null) {
@@ -134,7 +198,7 @@ class DependencyTask extends DefaultTask {
      */
     protected boolean canBeResolved(Configuration configuration) {
         return configuration.metaClass.respondsTo(configuration,
-                "isCanBeResolved")? configuration.isCanBeResolved() : true
+                "isCanBeResolved") ? configuration.isCanBeResolved() : true
     }
 
     /**
@@ -147,7 +211,7 @@ class DependencyTask extends DefaultTask {
     protected boolean isTest(Configuration configuration) {
         boolean isTestConfiguration = (
                 configuration.name.startsWith(TEST_PREFIX) ||
-                configuration.name.startsWith(ANDROID_TEST_PREFIX))
+                        configuration.name.startsWith(ANDROID_TEST_PREFIX))
         configuration.hierarchy.each {
             isTestConfiguration |= TEST_COMPILE.contains(it.name)
         }
@@ -163,33 +227,77 @@ class DependencyTask extends DefaultTask {
         boolean isPackagedDependency = PACKAGED_DEPENDENCIES_PREFIXES.any {
             configuration.name.startsWith(it)
         }
+        configuration.hierarchy.each {
+            String configurationHierarchyName = it.name
+            isPackagedDependency |= PACKAGED_DEPENDENCIES_PREFIXES.any {
+                configurationHierarchyName.startsWith(it)
+            }
+        }
 
         return isPackagedDependency
     }
 
     protected Set<ResolvedArtifact> getResolvedArtifacts(
             Configuration configuration) {
-        /**
-         * skip the configurations that, cannot be resolved in
-         * newer version of gradle api, are tests, or are not packaged dependencies.
-         */
-        if (!canBeResolved(configuration)
-                || isTest(configuration)
-                || !isPackagedDependency(configuration)) {
+
+        if (shouldSkipConfiguration(configuration)) {
             return null
         }
 
         try {
-            return configuration.getResolvedConfiguration()
-                    .getResolvedArtifacts()
-        } catch(ResolveException exception) {
+            return getResolvedArtifactsFromResolvedDependencies(
+                    configuration.getResolvedConfiguration()
+                            .getLenientConfiguration()
+                            .getFirstLevelModuleDependencies())
+        } catch (ResolveException exception) {
+            logger.warn("Failed to resolve OSS licenses for $configuration.name.", exception)
             return null
         }
+    }
+
+    /**
+     * Returns true for configurations that cannot be resolved in the newer
+     * version of gradle API, are tests, or are not packaged dependencies.
+     */
+    private boolean shouldSkipConfiguration(Configuration configuration) {
+        (!canBeResolved(configuration)
+                || isTest(configuration)
+                || !isPackagedDependency(configuration))
+    }
+
+    protected Set<ResolvedArtifact> getResolvedArtifactsFromResolvedDependencies(
+            Set<ResolvedDependency> resolvedDependencies) {
+
+        HashSet<ResolvedArtifact> resolvedArtifacts = new HashSet<>()
+        for (resolvedDependency in resolvedDependencies) {
+            try {
+                if (resolvedDependency.getModuleVersion() == LOCAL_LIBRARY_VERSION) {
+                    /**
+                     * Attempting to getAllModuleArtifacts on a local library project will result
+                     * in AmbiguousVariantSelectionException as there are not enough criteria
+                     * to match a specific variant of the library project. Instead we skip the
+                     * the library project itself and enumerate its dependencies.
+                     */
+                    resolvedArtifacts.addAll(
+                            getResolvedArtifactsFromResolvedDependencies(
+                                    resolvedDependency.getChildren()))
+                } else {
+                    resolvedArtifacts.addAll(resolvedDependency.getAllModuleArtifacts())
+                }
+            } catch (AmbiguousVariantSelectionException exception) {
+                logger.warn("Failed to process $resolvedDependency.name", exception)
+            }
+        }
+        return resolvedArtifacts
     }
 
     private void initOutput() {
         if (!outputDir.exists()) {
             outputDir.mkdirs()
         }
+    }
+
+    void setProject(Project project) {
+        this.project = project
     }
 }
